@@ -11,6 +11,7 @@ Call e.g. with tools/run-perf.py --arch ia32 some_suite.json
 The suite json format is expected to be:
 {
   "path": <relative path chunks to perf resources and main file>,
+  "owners": [<list of email addresses of benchmark owners (required)>],
   "name": <optional suite name, file name is default>,
   "archs": [<architecture name for which this suite is run>, ...],
   "binary": <name of binary to run, default "d8">,
@@ -55,6 +56,7 @@ A suite without "tests" is considered a performance test itself.
 Full example (suite with one runner):
 {
   "path": ["."],
+  "owners": ["username@chromium.org"],
   "flags": ["--expose-gc"],
   "test_flags": ["5"],
   "archs": ["ia32", "x64"],
@@ -74,6 +76,7 @@ Full example (suite with one runner):
 Full example (suite with several runners):
 {
   "path": ["."],
+  "owners": ["username@chromium.org", "otherowner@google.com"],
   "flags": ["--expose-gc"],
   "archs": ["ia32", "x64"],
   "run_count": 5,
@@ -121,6 +124,8 @@ GENERIC_RESULTS_RE = re.compile(r"^RESULT ([^:]+): ([^=]+)= ([^ ]+) ([^ ]*)$")
 RESULT_STDDEV_RE = re.compile(r"^\{([^\}]+)\}$")
 RESULT_LIST_RE = re.compile(r"^\[([^\]]+)\]$")
 TOOLS_BASE = os.path.abspath(os.path.dirname(__file__))
+ANDROID_BUILD_TOOLS = os.path.join(
+    os.path.dirname(TOOLS_BASE), 'build', 'android')
 
 
 def LoadAndroidBuildTools(path):  # pragma: no cover
@@ -389,6 +394,7 @@ class DefaultSentinel(Node):
     self.stddev_regexp = None
     self.units = "score"
     self.total = False
+    self.owners = []
 
 
 class GraphConfig(Node):
@@ -401,6 +407,7 @@ class GraphConfig(Node):
     self._suite = suite
 
     assert isinstance(suite.get("path", []), list)
+    assert isinstance(suite.get("owners", []), list)
     assert isinstance(suite["name"], basestring)
     assert isinstance(suite.get("flags", []), list)
     assert isinstance(suite.get("test_flags", []), list)
@@ -411,6 +418,7 @@ class GraphConfig(Node):
     self.graphs = parent.graphs[:] + [suite["name"]]
     self.flags = parent.flags[:] + suite.get("flags", [])
     self.test_flags = parent.test_flags[:] + suite.get("test_flags", [])
+    self.owners = parent.owners[:] + suite.get("owners", [])
 
     # Values independent of parent node.
     self.resources = suite.get("resources", [])
@@ -451,6 +459,7 @@ class TraceConfig(GraphConfig):
   def __init__(self, suite, parent, arch):
     super(TraceConfig, self).__init__(suite, parent, arch)
     assert self.results_regexp
+    assert self.owners
 
   def CreateMeasurement(self, perform_measurement):
     if not perform_measurement:
@@ -625,8 +634,16 @@ class Platform(object):
     self.extra_flags = options.extra_flags.split()
 
   @staticmethod
+  def ReadBuildConfig(options):
+    config_path = os.path.join(options.shell_dir, 'v8_build_config.json')
+    if not os.path.isfile(config_path):
+      return {}
+    with open(config_path) as f:
+      return json.load(f)
+
+  @staticmethod
   def GetPlatform(options):
-    if options.android_build_tools:
+    if Platform.ReadBuildConfig(options).get('is_android', False):
       return AndroidPlatform(options)
     else:
       return DesktopPlatform(options)
@@ -720,7 +737,7 @@ class AndroidPlatform(Platform):  # pragma: no cover
 
   def __init__(self, options):
     super(AndroidPlatform, self).__init__(options)
-    LoadAndroidBuildTools(options.android_build_tools)
+    LoadAndroidBuildTools(ANDROID_BUILD_TOOLS)
 
     if not options.device:
       # Detect attached device if not specified.
@@ -968,9 +985,7 @@ class CustomMachineConfiguration:
 def Main(args):
   logging.getLogger().setLevel(logging.INFO)
   parser = optparse.OptionParser()
-  parser.add_option("--android-build-tools",
-                    help="Path to chromium's build/android. Specifying this "
-                         "option will run tests using android platform.")
+  parser.add_option("--android-build-tools", help="Deprecated.")
   parser.add_option("--arch",
                     help=("The architecture to run tests for, "
                           "'auto' or 'native' for auto-detect"),
@@ -1039,10 +1054,6 @@ def Main(args):
 
   if not options.arch in SUPPORTED_ARCHS:  # pragma: no cover
     print "Unknown architecture %s" % options.arch
-    return 1
-
-  if options.device and not options.android_build_tools:  # pragma: no cover
-    print "Specifying a device requires Android build tools."
     return 1
 
   if (options.json_test_results_secondary and
